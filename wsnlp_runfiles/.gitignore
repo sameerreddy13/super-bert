@@ -1,0 +1,15 @@
+*.DS_Store
+*.png
+*.ipynb_checkpoints
+*.log
+*.npy
+*.json
+*.pt
+*.out
+__pycache__/
+*.pth
+*.pkl
+*.txt
+*outputs_run_ws/
+*tmp/
+*bookcorpus_tokenized/
