@@ -151,6 +151,7 @@ _import_structure = {
         "BERT_PRETRAINED_CONFIG_ARCHIVE_MAP",
         "BasicTokenizer",
         "BertConfig",
+        "SuperBertConfig",
         "BertTokenizer",
         "WordpieceTokenizer",
     ],
@@ -563,11 +564,11 @@ if is_torch_available():
             "BertForNextSentencePrediction",
             "BertForPreTraining",
             "BertForQuestionAnswering",
-            "BertForSequenceClassification",
+            "SuperBertForSequenceClassification",
             "BertForTokenClassification",
-            "BertLayer",
+            "SuperBertLayer",
             "BertLMHeadModel",
-            "BertModel",
+            "SuperBertModel",
             "BertPreTrainedModel",
             "load_tf_weights_in_bert",
         ]
@@ -1817,6 +1818,7 @@ if TYPE_CHECKING:
         BERT_PRETRAINED_CONFIG_ARCHIVE_MAP,
         BasicTokenizer,
         BertConfig,
+        SuperBertConfig, 
         BertTokenizer,
         WordpieceTokenizer,
     )
@@ -2184,6 +2186,9 @@ if TYPE_CHECKING:
             BertModel,
             BertPreTrainedModel,
             load_tf_weights_in_bert,
+            SuperBertForSequenceClassification,
+            SuperBertLayer,
+            SuperBertModel,
         )
         from .models.bert_generation import (
             BertGenerationDecoder,

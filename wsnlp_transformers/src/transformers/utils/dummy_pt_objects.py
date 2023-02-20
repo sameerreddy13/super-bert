@@ -636,6 +636,14 @@ class BertForSequenceClassification:
     def from_pretrained(cls, *args, **kwargs):
         requires_backends(cls, ["torch"])
 
+class SuperBertForSequenceClassification:
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
 
 class BertForTokenClassification:
     def __init__(self, *args, **kwargs):
@@ -650,6 +658,9 @@ class BertLayer:
     def __init__(self, *args, **kwargs):
         requires_backends(self, ["torch"])
 
+class SuperBertLayer:
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
 
 class BertLMHeadModel:
     def __init__(self, *args, **kwargs):
@@ -661,6 +672,14 @@ class BertLMHeadModel:
 
 
 class BertModel:
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["torch"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["torch"])
+
+class SuperBertModel:
     def __init__(self, *args, **kwargs):
         requires_backends(self, ["torch"])
 

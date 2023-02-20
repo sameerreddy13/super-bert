@@ -56,7 +56,6 @@ from ...modeling_utils import (
 from ...utils import logging
 from .configuration_bert import BertConfig
 
-
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "bert-base-uncased"

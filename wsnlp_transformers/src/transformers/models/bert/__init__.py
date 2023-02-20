@@ -22,7 +22,7 @@ from ...file_utils import _LazyModule, is_flax_available, is_tf_available, is_to
 
 
 _import_structure = {
-    "configuration_bert": ["BERT_PRETRAINED_CONFIG_ARCHIVE_MAP", "BertConfig", "BertOnnxConfig"],
+    "configuration_bert": ["BERT_PRETRAINED_CONFIG_ARCHIVE_MAP", "BertConfig", "BertOnnxConfig", "SuperBertConfig"],
     "tokenization_bert": ["BasicTokenizer", "BertTokenizer", "WordpieceTokenizer"],
 }
 
@@ -37,11 +37,11 @@ if is_torch_available():
         "BertForNextSentencePrediction",
         "BertForPreTraining",
         "BertForQuestionAnswering",
-        "BertForSequenceClassification",
+        "SuperBertForSequenceClassification",
         "BertForTokenClassification",
-        "BertLayer",
+        "SuperBertLayer",
         "BertLMHeadModel",
-        "BertModel",
+        "SuperBertModel",
         "BertPreTrainedModel",
         "load_tf_weights_in_bert",
     ]
@@ -77,7 +77,7 @@ if is_flax_available():
     ]
 
 if TYPE_CHECKING:
-    from .configuration_bert import BERT_PRETRAINED_CONFIG_ARCHIVE_MAP, BertConfig, BertOnnxConfig
+    from .configuration_bert import BERT_PRETRAINED_CONFIG_ARCHIVE_MAP, BertConfig, BertOnnxConfig, SuperBertConfig
     from .tokenization_bert import BasicTokenizer, BertTokenizer, WordpieceTokenizer
 
     if is_tokenizers_available():
@@ -91,11 +91,11 @@ if TYPE_CHECKING:
             BertForNextSentencePrediction,
             BertForPreTraining,
             BertForQuestionAnswering,
-            BertForSequenceClassification,
+            SuperBertForSequenceClassification,
             BertForTokenClassification,
-            BertLayer,
+            SuperBertLayer,
             BertLMHeadModel,
-            BertModel,
+            SuperBertModel,
             BertPreTrainedModel,
             load_tf_weights_in_bert,
         )

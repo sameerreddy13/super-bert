@@ -17,11 +17,13 @@
 
 # @sameer - New imports #####################################
 import copy
-
-from .configuration_bert_super import SuperBertConfig
+import pdb
+from .configuration_bert import SuperBertConfig
 from .module.utils import calc_dropout
 from .module.linear_super import LinearSuper
 from .module.layernorm_super import LayerNormSuper
+from .module.embedding_super import EmbeddingSuper
+
 ##################################################
 
 import math
@@ -66,7 +68,7 @@ from ...modeling_utils import (
 )
 from ...utils import logging
 from .configuration_bert import BertConfig
-import numpy as np 
+import numpy as np
 
 logger = logging.get_logger(__name__)
 
@@ -174,58 +176,36 @@ def load_tf_weights_in_bert(model, config, tf_checkpoint_path):
         pointer.data = torch.from_numpy(array)
     return model
 
-# class DynamicLinear(nn.Linear):
-#     def __init__(
-#             self, 
-#             in_features,
-#             out_features, 
-#             num_heads, 
-#             bias=True, 
-#             drop_cols=False,
-#             drop_rows=False
-#         ):
-#         super(DynamicLinear, self).__init__(
-#             in_features, out_features, bias=bias)
-#         self.in_features_max = in_features
-#         self.out_features_max = out_features
-#         # TODO: rename to something like `num_units` that is more general
-#         self.num_heads = num_heads
-#         self.drop_cols = drop_cols
-#         self.drop_rows = drop_rows
-    
-#     @staticmethod
-#     def round_to_nearest(input_size, shrink_mult, num_heads, min_value=1):
-#         new_shrink_mult = round(num_heads * shrink_mult)*1.0/num_heads
-#         input_size = int(new_shrink_mult * input_size)
-#         new_input_size = max(min_value, input_size)
-#         return new_input_size
-    
-#     def forward(self, input, shrink_mult=1.):
-#         if self.drop_cols:
-#             self.in_features = self.round_to_nearest(self.in_features_max, shrink_mult, self.num_heads)
-#         if self.drop_rows:
-#             self.out_features = self.round_to_nearest(self.out_features_max, shrink_mult, self.num_heads)
-#         weight = self.weight[:self.out_features, :self.in_features]
-#         if self.bias is not None:
-#             bias = self.bias[:self.out_features]
-#         else:
-#             bias = self.bias
-#         # applies f(x) = xW^T + b
-#         return nn.functional.linear(input, weight, bias)
-
 
 class SuperBertEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
 
     def __init__(self, config: SuperBertConfig):
         super().__init__()
-        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
+        # Store for reference
+        self.config = config
 
+        self.super_out_dim = config.super_embed_dim
+        self.sample_out_dim = None
+
+        self.word_embeddings = EmbeddingSuper(
+            num_embeddings=config.vocab_size,
+            embedding_dim=self.super_out_dim,
+            padding_idx=config.pad_token_id,
+        )
+        self.position_embeddings = EmbeddingSuper(
+            num_embeddings=config.max_position_embeddings,
+            embedding_dim=self.super_out_dim,
+        )
+        self.token_type_embeddings = EmbeddingSuper(
+            num_embeddings=config.type_vocab_size,
+            embedding_dim=self.super_out_dim,
+        )
+
+        # TODO: Take note of this nuance and maybe revert to non snake case.
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
-        # any TensorFlow checkpoint file
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        # any TensorFlow checkpoint file.
+        self.layer_norm = LayerNormSuper(self.super_out_dim, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
@@ -236,6 +216,12 @@ class SuperBertEmbeddings(nn.Module):
                 torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
                 persistent=False,
             )
+
+    def set_sample_config(self, sample_out_dim):
+        self.sample_out_dim = sample_out_dim
+        for e in (self.word_embeddings, self.position_embeddings, self.token_type_embeddings):
+            e.set_sample_config(sample_out_dim)
+        self.layer_norm.set_sample_config(sample_out_dim)
 
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, inputs_embeds=None, past_key_values_length=0
@@ -269,30 +255,32 @@ class SuperBertEmbeddings(nn.Module):
         if self.position_embedding_type == "absolute":
             position_embeddings = self.position_embeddings(position_ids)
             embeddings += position_embeddings
-        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.layer_norm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
 
-## Where to modify for elastic attention layers
+
 class SuperBertSelfAttention(nn.Module):
     def __init__(self, config: SuperBertConfig):
         super(SuperBertSelfAttention, self).__init__()
+        # Store for reference
+        self.config = config
 
-        # TODO @sameer - update this assertion 
-        if config.hidden_size % config.num_attention_heads != 0:
-            raise ValueError(
-                "The hidden size (%d) is not a multiple of the number of attention "
-                "heads (%d)" % (config.hidden_size, config.num_attention_heads))
+        # TODO @sameer - update this assertion
+        # if config.hidden_size % config.num_attention_heads != 0:
+        #     raise ValueError(
+        #         "The hidden size (%d) is not a multiple of the number of attention "
+        #         "heads (%d)" % (config.hidden_size, config.num_attention_heads))
 
         self.output_attentions = config.output_attentions
 
         # Supermodule config
-        self.num_attention_heads = config.super_num_heads   
+        self.super_num_heads = config.super_num_heads
         self.super_embed_dim = config.super_embed_dim
-        self.head_dim = self.embed_dim // self.num_attention_heads
-        self.scale = self.head_dim ** -0.5
+        self.super_head_dim = self.super_embed_dim // self.super_num_heads
+        self.super_attn_scale = self.super_head_dim**-0.5
 
-        # self.all_head_size = self.num_attention_heads * self.attention_head_size
+        # self.all_head_size = self.super_num_heads * self.super_head_dim
 
         # Setup qkv and dropout
         self.query = LinearSuper(self.super_embed_dim, self.super_embed_dim)
@@ -301,38 +289,44 @@ class SuperBertSelfAttention(nn.Module):
         self.dropout = nn.Dropout(config.super_attn_dropout)
 
         # Sample config variables
-        self.sample_in_embed_dim = None
         self.sample_num_heads = None
+        self.sample_in_embed_dim = None
         self.sample_qk_embed_dim = None
-        self.sample_v_embed_dim = None
-        # self.sample_scale = None
-
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
+        self.sample_head_dim = None
+        self.sample_attn_scale = None
 
     def set_sample_config(self, sample_qk_embed_dim=None, sample_num_heads=None, sample_in_embed_dim=None):
-        self.sample_in_embed_dim = sample_in_embed_dim
         self.sample_num_heads = sample_num_heads
+        self.sample_in_embed_dim = sample_in_embed_dim
         self.sample_qk_embed_dim = sample_qk_embed_dim
-        self.sample_scale = (self.sample_qk_embed_dim // self.sample_num_heads) ** -0.5
+        self.sample_head_dim = sample_qk_embed_dim // sample_num_heads
+        self.sample_attn_scale = (self.sample_qk_embed_dim // self.sample_num_heads) ** -0.5
         [
-            m.set_sample_config(self.sample_in_embed_dim, self.sample_qk_embed_dim) 
+            m.set_sample_config(self.sample_in_embed_dim, self.sample_qk_embed_dim)
             for m in (self.query, self.key, self.value)
         ]
 
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.sample_num_heads, self.sample_head_dim)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
     def forward(
-            self,
-            hidden_states,
-            attention_mask=None,
-            head_mask=None,
-            encoder_hidden_states=None,
-            encoder_attention_mask=None,
-            past_key_value=None,
-            output_attentions=False,
-            attention_ratio=1.
-        ):
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+    ):
+
+        # if self.sample_qk_embed_dim == None or self.query.sample_out_dim == None:
+        #     print("QK_EMBED_DIM", self.sample_qk_embed_dim)
+        #     print("QUERY_OUT_DIM", self.query.sample_out_dim)
+        #     pdb.set_trace()  # TODO remove
+
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
@@ -343,7 +337,7 @@ class SuperBertSelfAttention(nn.Module):
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores * self.scale
+        attention_scores = attention_scores * self.sample_attn_scale
         if attention_mask is not None:
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
             attention_scores = attention_scores + attention_mask
@@ -362,15 +356,19 @@ class SuperBertSelfAttention(nn.Module):
         context_layer = torch.matmul(attention_probs, value_layer)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        new_context_layer_shape = context_layer.size()[:-2] + (self.sample_qk_embed_dim,)
         context_layer = context_layer.view(*new_context_layer_shape)
         # output attention scores when needed
         outputs = (context_layer, attention_scores) if self.output_attentions else (context_layer,)
         return outputs
 
-class BertSelfOutput(nn.Module):
-    def __init__(self, config):
+
+class SuperBertSelfOutput(nn.Module):
+    def __init__(self, config: SuperBertConfig):
         super().__init__()
+        # Store for reference
+        self.config = config
+
         # takes BertSelfAttention outputs and projects to hidden size
         self.dense = LinearSuper(config.super_embed_dim, config.super_embed_dim)
         self.layer_norm = LayerNormSuper(config.super_embed_dim, eps=config.layer_norm_eps)
@@ -385,12 +383,16 @@ class BertSelfOutput(nn.Module):
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.layer_norm(hidden_states + input_tensor)
         return hidden_states
-    
+
+
 class SuperBertAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: SuperBertConfig):
         super().__init__()
+        # Store for reference
+        self.config = config
+
         self.self = SuperBertSelfAttention(config)
-        self.output = BertSelfOutput(config)
+        self.output = SuperBertSelfOutput(config)
         self.pruned_heads = set()
 
     # Not relevant for wsNLP
@@ -412,7 +414,12 @@ class SuperBertAttention(nn.Module):
         self.self.all_head_size = self.self.attention_head_size * self.self.num_attention_heads
         self.pruned_heads = self.pruned_heads.union(heads)
 
-    def set_sample_config(self, sample_qk_embed_dim=None, sample_num_heads=None, sample_in_embed_dim=None):
+    def set_sample_config(
+        self,
+        sample_qk_embed_dim=None,
+        sample_num_heads=None,
+        sample_in_embed_dim=None,
+    ):
         self.self.set_sample_config(sample_qk_embed_dim, sample_num_heads, sample_in_embed_dim)
         self.output.set_sample_config(sample_qk_embed_dim, sample_in_embed_dim)
 
@@ -426,7 +433,6 @@ class SuperBertAttention(nn.Module):
         past_key_value=None,
         output_attentions=False,
     ):
-        # Shapes: self_outputs[0] has shape (batch_size, seq_len, attention_ratio * hidden_dim)
         self_outputs = self.self(
             hidden_states,
             attention_mask,
@@ -435,17 +441,19 @@ class SuperBertAttention(nn.Module):
             encoder_attention_mask,
             past_key_value,
             output_attentions,
-            attention_ratio=self.attention_ratio
         )
         # Shapes: self.output projects self_outputs[0] to shape (batch_size, seq_len, hidden_dim)
-        attention_output = self.output(self_outputs[0], hidden_states, attention_ratio=self.attention_ratio)
+        attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
 
 class SuperBertIntermediate(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: SuperBertConfig):
         super().__init__()
+        # Store for reference
+        self.config = config
+
         self.dense = LinearSuper(config.super_embed_dim, config.super_ffn_embed_dim)
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
@@ -462,25 +470,32 @@ class SuperBertIntermediate(nn.Module):
 
 
 class SuperBertOutput(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: SuperBertConfig):
         super().__init__()
+        # Store for reference
+        self.config = config
+
         self.dense = LinearSuper(config.super_ffn_embed_dim, config.super_embed_dim)
-        self.LayerNorm = LayerNormSuper(config.super_embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm = LayerNormSuper(config.super_embed_dim, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.super_dropout)
 
     def set_sample_config(self, sample_in_dim, sample_out_dim, sample_layernorm_dim):
         self.dense.set_sample_config(sample_in_dim, sample_out_dim)
-        self.LayerNorm.set_sample_config(sample_layernorm_dim)
+        self.layer_norm.set_sample_config(sample_layernorm_dim)
 
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        hidden_states = self.layer_norm(hidden_states + input_tensor)
         return hidden_states
+
 
 class SuperBertLayer(nn.Module):
     def __init__(self, config: SuperBertConfig):
         super().__init__()
+        # Store for reference
+        self.config = config
+
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
 
@@ -493,18 +508,19 @@ class SuperBertLayer(nn.Module):
         self.config = config
         self.is_identity_layer = False
 
-        self.attention = SuperBertAttention(config) # @sameer - corresponds to ATTN + projection
-        self.intermediate = SuperBertIntermediate(config) # @sameer - corresponds to FC1
-        self.output = SuperBertOutput(config) # @sameer -  corresponds to FC2
+        self.attention = SuperBertAttention(config)  # @sameer - corresponds to ATTN + projection
+        self.intermediate = SuperBertIntermediate(config)  # @sameer - corresponds to FC1
+        self.output = SuperBertOutput(config)  # @sameer -  corresponds to FC2
 
     def set_sample_config(
         self,
-        sample_embed_dim,
-        sample_mlp_ratio,
-        sample_num_heads,
-        sample_dropout,
-        sample_out_dim,
-        sample_attn_dropout,
+        sample_embed_dim=None,
+        sample_mlp_ratio=None,
+        sample_num_heads=None,
+        sample_dropout=None,
+        sample_out_dim=None,
+        sample_attn_dropout=None,
+        sample_layer_num=None,
         is_identity_layer=False,
     ):
 
@@ -519,14 +535,15 @@ class SuperBertLayer(nn.Module):
         self.config.sample_embed_dim = sample_embed_dim
         self.config.sample_ffn_embed_dim = int(sample_embed_dim * sample_mlp_ratio)
         self.config.sample_num_heads = sample_num_heads
+        self.config.sample_layer_num = sample_layer_num
 
         self.config.sample_dropout = sample_dropout
         self.config.sample_attn_dropout = sample_attn_dropout
-        
+
         self.attention.set_sample_config(
-            sample_qk_embed_dim=sample_num_heads * 64, 
-            sample_num_heads=sample_num_heads, 
-            sample_in_embed_dim=sample_embed_dim, 
+            sample_qk_embed_dim=sample_num_heads * 64,
+            sample_num_heads=sample_num_heads,
+            sample_in_embed_dim=sample_embed_dim,
         )
 
         self.intermediate.set_sample_config(
@@ -550,6 +567,9 @@ class SuperBertLayer(nn.Module):
         past_key_value=None,
         output_attentions=False,
     ):
+        if self.is_identity_layer:
+            return (hidden_states,)
+
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
@@ -565,30 +585,35 @@ class SuperBertLayer(nn.Module):
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
 
         layer_output = apply_chunking_to_forward(
-            self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+            self.feed_forward_chunk,
+            self.chunk_size_feed_forward,
+            self.seq_len_dim,
+            attention_output,
         )
+
         outputs = (layer_output,) + outputs
 
         return outputs
- 
+
     def feed_forward_chunk(self, attention_output):
-        intermediate_output = self.intermediate(attention_output, self.intermediate_ratio)
-        layer_output = self.output(intermediate_output, attention_output, self.intermediate_ratio)
+        intermediate_output = self.intermediate(attention_output)
+        layer_output = self.output(intermediate_output, attention_output)
         return layer_output
+
 
 class SuperBertEncoder(nn.Module):
     def __init__(self, config: SuperBertConfig):
         super().__init__()
-        self.config = config 
+        self.config = config
         self.layer = nn.ModuleList()
 
         # Setup individual configs for each layer
-        for i in range(len(config.super_layer_num)):
+        for i in range(config.super_layer_num):
             # Create copy
-            layer_config = copy.deepcopy(config)    
+            layer_config = copy.deepcopy(config)
 
             # Set values
-            layer_config.super_layer_num = i    
+            layer_config.super_layer_num = i
             layer_config.super_embed_dim = config.super_embed_dim
             layer_config.super_mlp_ratio = config.super_mlp_ratio
             layer_config.super_num_heads = config.super_num_heads
@@ -597,39 +622,37 @@ class SuperBertEncoder(nn.Module):
             layer_config.super_ffn_embed_dim = config.super_ffn_embed_dim
 
             # Add to layer list
-            self.layer.append(
-                SuperBertLayer(layer_config)
-            )
+            self.layer.append(SuperBertLayer(layer_config))
 
     def set_sample_config(self):
-        # Set config for each layer 
-        for i , layer in enumerate(self.layer):
+        # Set config for each layer
+        for i, layer in enumerate(self.layer):
             if i < self.config.sample_layer_num:
                 # Calculate dropout
                 sample_dropout = calc_dropout(
-                    self.config.super_dropout, 
-                    self.config.sample_embed_dim[i], 
-                    self.config.super_embed_dim
+                    self.config.super_dropout,
+                    self.config.sample_embed_dim[i],
+                    self.config.super_embed_dim,
                 )
                 sample_attn_dropout = calc_dropout(
                     self.config.super_attn_dropout,
-                    self.config.sample_embed_dim[i], 
-                    self.config.super_embed_dim
+                    self.config.sample_embed_dim[i],
+                    self.config.super_embed_dim,
                 )
-                
                 # Set sample config
                 layer.set_sample_config(
-                        is_identity_layer=False,
-                        sample_embed_dim=self.config.sample_embed_dim[i],
-                        sample_mlp_ratio=self.config.sample_mlp_ratio[i],
-                        sample_num_heads=self.config.sample_num_heads[i],
-                        sample_dropout=sample_dropout,
-                        sample_out_dim=self.config.sample_output_dim[i],
-                        sample_attn_dropout=sample_attn_dropout,
+                    is_identity_layer=False,
+                    sample_embed_dim=self.config.sample_embed_dim[i],
+                    sample_mlp_ratio=self.config.sample_mlp_ratio[i],
+                    sample_num_heads=self.config.sample_num_heads[i],
+                    sample_out_dim=self.config.sample_out_dim[i],
+                    sample_dropout=sample_dropout,
+                    sample_attn_dropout=sample_attn_dropout,
+                    sample_layer_num=i,
                 )
             else:
                 # Set identity if more than sample_layer_num
-                layer.set_sample_config(is_identity_layer=True)   
+                layer.set_sample_config(is_identity_layer=True)
 
     def forward(
         self,
@@ -725,8 +748,14 @@ class SuperBertEncoder(nn.Module):
 class SuperBertPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
+        # Store for reference
+        self.config = config
+
         self.dense = LinearSuper(config.super_embed_dim, config.super_embed_dim)
         self.activation = nn.Tanh()
+
+    def set_sample_config(self, sample_embed_dim):
+        self.dense.set_sample_config(sample_embed_dim, sample_embed_dim)
 
     def forward(self, hidden_states):
         # We "pool" the model by simply taking the hidden state corresponding
@@ -735,6 +764,7 @@ class SuperBertPooler(nn.Module):
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         return pooled_output
+
 
 class BertPreTrainedModel(PreTrainedModel):
     """
@@ -762,6 +792,7 @@ class BertPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+
 
 BERT_START_DOCSTRING = r"""
 
@@ -838,15 +869,15 @@ BERT_INPUTS_DOCSTRING = r"""
 class SuperBertModel(BertPreTrainedModel):
     """
 
-    The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
-    cross-attention is added between the self-attention layers, following the architecture described in `Attention is
-    all you need <https://arxiv.org/abs/1706.03762>`__ by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit,
-    Llion Jones, Aidan N. Gomez, Lukasz Kaiser and Illia Polosukhin.
-t
-    To behave as an decoder the model needs to be initialized with the :obj:`is_decoder` argument of the configuration
-    set to :obj:`True`. To be used in a Seq2Seq model, the model needs to initialized with both :obj:`is_decoder`
-    argument and :obj:`add_cross_attention` set to :obj:`True`; an :obj:`encoder_hidden_states` is then expected as an
-    input to the forward pass.
+        The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
+        cross-attention is added between the self-attention layers, following the architecture described in `Attention is
+        all you need <https://arxiv.org/abs/1706.03762>`__ by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit,
+        Llion Jones, Aidan N. Gomez, Lukasz Kaiser and Illia Polosukhin.
+    t
+        To behave as an decoder the model needs to be initialized with the :obj:`is_decoder` argument of the configuration
+        set to :obj:`True`. To be used in a Seq2Seq model, the model needs to initialized with both :obj:`is_decoder`
+        argument and :obj:`add_cross_attention` set to :obj:`True`; an :obj:`encoder_hidden_states` is then expected as an
+        input to the forward pass.
     """
 
     def __init__(self, config: SuperBertConfig, add_pooling_layer=True):
@@ -862,29 +893,36 @@ t
         # Apply pooler, which inputs into task heads
         self.pooler = SuperBertPooler(config) if add_pooling_layer else None
 
-        self.init_weights()    
+        self.init_weights()
 
     def set_sample_config(self, sample_config: dict):
         # Track full sample config (value per layer for layer specific params)
-        self.config.sample_embed_dim = sample_config['embed_dim']
-        self.config.sample_mlp_ratio = sample_config['mlp_ratio']
-        self.config.sample_num_heads = sample_config['num_heads']
+        self.config.sample_embed_dim = sample_config["embed_dim"]
+        self.config.sample_mlp_ratio = sample_config["mlp_ratio"]
+        self.config.sample_num_heads = sample_config["num_heads"]
 
         # Sample output dim for each layer after first embedding layer
-        self.config.sample_output_dim = [out_dim for out_dim in self.sample_embed_dim[1:]] + [self.sample_embed_dim[-1]]
+        self.config.sample_out_dim = [out_dim for out_dim in self.config.sample_embed_dim[1:]] + [
+            self.config.sample_embed_dim[-1]
+        ]
 
-        # Int, max layer num
-        self.config.sample_layer_num = sample_config['layer_num']
-        
+        # Max layer num (depth)
+        self.config.sample_layer_num = sample_config["layer_num"]
+
         # This is sample_dropout for after the embedding layer
-        self.config.sample_dropout = calc_dropout(self.super_dropout, self.sample_embed_dim[0], self.super_embed_dim)
+        self.config.sample_dropout = calc_dropout(
+            self.config.super_dropout, self.config.sample_embed_dim[0], self.config.super_embed_dim
+        )
+
+        # Update embedding sample config
+        self.embeddings.set_sample_config(self.config.sample_embed_dim[0])
 
         # Update encoder sample config. This will broadcast params to all layers
-        self.encoder.set_sample_config(sample_config)
+        self.encoder.set_sample_config()
 
         # Update pooler sample config
-        self.pooler.dense.set_sample_config(self.config.sample_embed_dim, self.config.sample_embed_dim)
-    
+        self.pooler.set_sample_config(self.config.sample_embed_dim[-1])
+
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
 
@@ -1000,7 +1038,6 @@ t
         # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
-
         embedding_output = self.embeddings(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -1064,13 +1101,15 @@ class SuperBertForSequenceClassification(BertPreTrainedModel):
         output_type=SequenceClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
     )
-
     def set_sample_config(self, sample_config: dict):
         # set bert encoder sample config
         self.bert.set_sample_config(sample_config)
 
         # set classifier sample config
-        self.classifier.set_sample_config(sample_embed_dim=self.sample_embed_dim[-1], sample_out_dim=self.num_labels)
+        self.classifier.set_sample_config(
+            sample_in_dim=self.config.sample_embed_dim[-1],
+            sample_out_dim=self.num_labels,
+        )
 
     def forward(
         self,
